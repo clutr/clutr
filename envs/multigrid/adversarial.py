@@ -26,16 +26,17 @@ Has additional functions, step_adversary, and reset_agent. How to use:
    adversary designed it. A new agent can now play it using the step() function.
 """
 import random
-import time
+
 import gym
 import gym_minigrid.minigrid as minigrid
 import networkx as nx
 from networkx import grid_graph
 import numpy as np
-
+import torch
+import random
 from . import multigrid
 from . import register
-
+import os, sys
 EDITOR_ACTION_SPACES = {
     'walls_none': {
         0: '-',
@@ -205,6 +206,50 @@ class AdversarialEnv(multigrid.MultiGridEnv):
                     self.ae.load_state_dict(torch.load(task_ae, map_location="cpu"))
                 else:
                     raise NotImplementedError(f"{self.ae_type} not implemented")
+            
+            elif self.latent_task_exp == "multistep_discrete":
+                self.adversary_max_steps = self.latent_dim
+                self.adversary_action_space = gym.spaces.Discrete(self.latent_space_discrete_max + 1)
+
+                self.adversary_ts_obs_space = gym.spaces.Box(
+                    low=0, high=self.latent_dim, shape=(1,),
+                    dtype='uint32')
+
+                self.adversary_randomz_obs_space = gym.spaces.Box(
+                    low=0, high=1.0, shape=(random_z_dim,), dtype=np.float32) 
+
+                self.adversary_observation_space = gym.spaces.Dict(
+                    {'time_step': self.adversary_ts_obs_space,
+                     'random_z': self.adversary_randomz_obs_space})
+
+                #####LOAD VAE (Copied from singlestep continous)
+                if self.ae_type == "lstm_vae":
+                    self.ae_seq_len = n_clutter + 2
+                    self.cuda = cuda
+                    # the actual range of discrete actions is [0, self.skecth_dim**2 +1] => [0, 101] for sketch_dim=10
+                    # the +1 is for the skip action
+                    # the 0 is for what??
+                    # so we have self.skecth_dim**2 +2 discrete symbols => [0, 101]
+                    # the vae generates [1, 102]
+                    self.ae_batch_loader = BatchLoader(grid_size=self.actual_grid_size,
+                                                       max_seq_len=self.ae_seq_len,
+                                                       env_name="minigrid")
+
+                    parameters = Parameters(self.ae_batch_loader.max_seq_len,
+                                            word_vocab_size=self.ae_batch_loader.words_vocab_size,
+                                            latent_variable_size=self.latent_dim,
+                                            vae_type="vae",
+                                            enc_activation=self.enc_activation,
+                                            env_name="minigrid",
+                                            word_embed_size=self.word_embed_size,
+                                            activation_scalar=self.activation_scalar
+                                            )
+                    self.ae = RVAE(parameters)
+                    import torch
+                    self.ae.load_state_dict(torch.load(task_ae, map_location="cpu"))
+                else:
+                    raise NotImplementedError(f"{self.ae_type} not implemented")
+
             else:
                 raise NotImplementedError(f"{self.latent_task_exp} not implemented for latent task carracing")
 
@@ -308,6 +353,14 @@ class AdversarialEnv(multigrid.MultiGridEnv):
         if self.use_latent_task:
             if self.latent_task_exp == "singlestep_continuous":
                 obs = {
+                    'random_z': self.generate_random_z()
+                }
+                return obs
+            elif self.latent_task_exp == "multistep_discrete" :
+
+                self.env_actions = []
+                obs = {
+                    'time_step': [self.adversary_step_count],
                     'random_z': self.generate_random_z()
                 }
                 return obs
@@ -608,7 +661,13 @@ class AdversarialEnv(multigrid.MultiGridEnv):
                                  deterministic=self.deterministic_vae)
 
             seq = [int(n) - 1 for n in seq.split() if n.isdigit()]
-            return seq[2:] + seq[:2] # MINIGRID VAE PLACES AGENT AND GOAL FIRST, but ENvironment vector needs to be in the end
+
+            if self.latent_task_exp == "singlestep_continuous":
+                return seq[2:] + seq[:2] # MINIGRID VAE PLACES AGENT AND GOAL FIRST, but Environment vector needs to be in the end
+            elif self.latent_task_exp == "multistep_discrete":
+                return seq 
+            else:
+                raise NotImplementedError
         else:
             raise NotImplementedError
 
@@ -657,6 +716,32 @@ class AdversarialEnv(multigrid.MultiGridEnv):
                 }
                 done = True
                 self.adversary_step_count += 1
+
+            elif self.latent_task_exp == "multistep_discrete":
+                self.adversary_step_count += 1
+                self.env_actions.append(loc)
+                done = False
+
+                obs = {
+                    'time_step': [self.adversary_step_count],
+                    'random_z': self.generate_random_z()
+                }
+
+                # End of episode
+                if self.adversary_step_count >= self.adversary_max_steps:
+                    done = True
+                    locs = self.get_env_vector_from_latent_vector(latent_vector)
+
+                    all_pos = set()
+                    for i in range(len(locs)):
+                        x, y = self.single_step(locs[i], i, len(locs))
+                        all_pos.add((x, y))
+
+                    while len(all_pos)<2:
+                        self.single_step(random.randint(0, self.grid_dim-1), i, 2)
+                        i+=1
+                        all_pos.add((x, y))
+
             else:
                 raise NotImplementedError()
 
