@@ -37,8 +37,6 @@ python -m eval \
 --result_path <result_dir>
 ```
 
-## Data
-Models and data used in the paper can be found [here](https://drive.google.com/drive/folders/1hs6eCpbAb2DTaiURAc4U9AQd5y5QgO4c?usp=sharing)
 
 
 
